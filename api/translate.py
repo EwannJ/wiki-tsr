@@ -269,11 +269,51 @@ def _peel(fragment: str) -> tuple:
     return lead, fragment, trail
 
 
+# traductions imposées {texte français: {langue DeepL: texte}} : sert quand DeepL traduit mal un mot du menu (à compléter)
+_OVERRIDES = {}
+# précisions ajoutées au contexte de la traduction du menu
+_HINTS = "'Formations' means training courses for players, not train formations or train sets."
+_labels_memory = {}  # (empreinte, langue) -> {texte français: traduction}
+
+
+def _label_translations(topbar_raw: str, lang: str):
+    """{texte français: traduction} pour chaque texte du menu : traduits une seule fois, repris tels quels partout (menu, tuiles...)."""
+    cut = _BODY_RE.search(topbar_raw)
+    body = topbar_raw[cut.end():] if cut else topbar_raw
+    labels = sorted({_visible_text(body[a:b]) for a, b, to_translate in _split(body) if to_translate} - {""})
+    labels = [label for label in labels if _LETTER_RE.search(label)]
+    key = (hashlib.sha256("\n".join(labels).encode()).hexdigest(), lang)
+    if key not in _labels_memory:
+        if not DEEPL_API_KEY or time.time() - _failed.get(lang, 0) < 60:
+            return None
+        context = f"{_CONTEXT} The texts are the menu entries of the site: {', '.join(labels)}. {_HINTS}"
+        done = _deepl(labels, lang, False, context)
+        if done is None:
+            _failed[lang] = time.time()
+            return None
+        _labels_memory[key] = dict(zip(labels, done))
+    result = dict(_labels_memory[key])
+    for text, by_lang in _OVERRIDES.items():
+        if text in result and lang in by_lang:
+            result[text] = by_lang[lang]
+    return result
+
+
+_ONLY_TEXT_RE = re.compile(r"((?:<[^>]+>\s*)*)([^<>]+?)(\s*(?:</[^>]+>\s*)*)")
+
+
+def _known_label(core: str, labels: dict):
+    """Traduction déjà connue si le bloc ne contient que le texte d'une entrée du menu, sinon None."""
+    m = _ONLY_TEXT_RE.fullmatch(core)
+    text = labels.get(_visible_text(m.group(2))) if m else None
+    return None if text is None else m.group(1) + html.escape(text, quote=False) + m.group(3)
+
+
 def _mark_no_translate(fragment: str) -> str:
     return re.sub(r"<(code|kbd|pre)\b(?![^>]*translate=)", r'<\1 translate="no"', fragment)
 
 
-def _translate(raw: str, target: str, context: str = _CONTEXT):
+def _translate(raw: str, target: str, context: str = _CONTEXT, labels: dict = None):
     """Fragment HTML français -> traduit, mêmes balises et mêmes %%jetons%% ; None si DeepL échoue."""
     cut = _BODY_RE.search(raw)
     head, body = (raw[:cut.end()], raw[cut.end():]) if cut else ("", raw)
@@ -296,14 +336,17 @@ def _translate(raw: str, target: str, context: str = _CONTEXT):
     plain_in = ([html.unescape(title.group(2))] if title else []) + attrs
 
     peeled = [_peel(body[a:b]) for a, b in blocks]
+    known = [_known_label(core, labels or {}) for _, core, _ in peeled]
+    todo = [_mark_no_translate(core) for (_, core, _), text in zip(peeled, known) if text is None]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        job_blocks = pool.submit(_deepl, [_mark_no_translate(core) for _, core, _ in peeled], target, True, context) if blocks else None
+        job_blocks = pool.submit(_deepl, todo, target, True, context) if todo else None
         job_plain = pool.submit(_deepl, plain_in, target, False, context) if plain_in else None
         done_blocks = job_blocks.result() if job_blocks else []
         done_plain = job_plain.result() if job_plain else []
     if done_blocks is None or done_plain is None:
         return None
-    done_blocks = [lead + text + trail for (lead, _, trail), text in zip(peeled, done_blocks)]
+    fresh = iter(done_blocks)
+    done_blocks = [lead + (text if text is not None else next(fresh)) + trail for (lead, _, trail), text in zip(peeled, known)]
 
     if title:
         head = head.replace(title.group(0), title.group(0).replace(title.group(2), html.escape(done_plain[0]), 1), 1)
@@ -340,9 +383,9 @@ def _sb(method: str, query: dict, payload=None):
         return json.loads(r.read() or b"null")
 
 
-def _cached_translation(name: str, raw: str, lang: str, context: str):
+def _cached_translation(name: str, raw: str, lang: str, context: str, labels: dict):
     """(HTML traduit ou None, origine) ; origine = mem, db, deepl ou fail."""
-    fingerprint = "sha256:" + hashlib.sha256(("v2:" + context + "\n" + raw).encode()).hexdigest()
+    fingerprint = "sha256:" + hashlib.sha256(("v3:" + context + "\n" + json.dumps(labels, sort_keys=True, ensure_ascii=False) + "\n" + raw).encode()).hexdigest()
     key = (fingerprint, lang)
     if key in _memory:
         return _memory[key], "mem"
@@ -359,7 +402,7 @@ def _cached_translation(name: str, raw: str, lang: str, context: str):
             print(f"translate : error 'supabase lookup failed for {name}/{lang} : {e}'")
     if not DEEPL_API_KEY or time.time() - _failed.get(lang, 0) < 60:
         return None, "fail"
-    text = _translate(raw, lang, context)
+    text = _translate(raw, lang, context, labels)
     if text is None:
         _failed[lang] = time.time()
         return None, "fail"
@@ -408,8 +451,9 @@ def _render(page_path: str, lang: str, link_param: str) -> tuple:
     if lang != "FR":
         nav = _visible_text(parts["topbar"])
         contexts = {name: _build_context(raw, nav) for name, raw in parts.items()}
+        labels = _label_translations(parts["topbar"], lang)
         with ThreadPoolExecutor(max_workers=3) as pool:
-            results = dict(zip(parts, pool.map(lambda item: _cached_translation(item[0], item[1], lang, contexts[item[0]]), parts.items())))
+            results = dict(zip(parts, pool.map(lambda item: _cached_translation(item[0], item[1], lang, contexts[item[0]], labels), parts.items()))) if labels is not None else {"": (None, "fail")}
         if any(text is None for text, _ in results.values()):
             lang = "FR"  # DeepL indisponible : version française
         else:
