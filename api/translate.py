@@ -29,7 +29,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #          (sans ?lang= dans l'URL : langue du navigateur)
 #          True  = l'URL reste propre : si ?lang=xx est présent (menu, lien partagé), la langue est mémorisée dans le cookie "lang"
 #                  puis ?lang=xx est retiré de l'URL (redirection). Sans cookies, la langue n'est alors pas conservée d'une page à l'autre.
-HIDE_LANG_PARAM = False
+HIDE_LANG_PARAM = True
 
 DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
 # les clés gratuites finissent par ":fx"
