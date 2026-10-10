@@ -272,7 +272,7 @@ def _peel(fragment: str) -> tuple:
 # traductions imposées {texte français: {langue DeepL: texte}} : sert quand DeepL traduit mal un mot du menu (à compléter)
 _OVERRIDES = {}
 # précisions ajoutées au contexte de la traduction du menu
-_HINTS = "'Formations' means training for players, not train formations or train sets."
+_HINTS = "'Formations' means training for players, not train formations or train sets, idem in german but in german."
 _labels_memory = {}  # (empreinte, langue) -> {texte français: traduction}
 
 
