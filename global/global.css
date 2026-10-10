@@ -25,3 +25,26 @@ main {
     padding-right: 20px;
     box-sizing: border-box;
 }
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(14px); }
+}
+
+main > * { animation: rise-in .6s ease-out backwards; }
+main > :nth-child(2) { animation-delay: .08s; }
+main > :nth-child(3) { animation-delay: .16s; }
+main > :nth-child(4) { animation-delay: .24s; }
+main > :nth-child(5) { animation-delay: .32s; }
+main > :nth-child(n+6) { animation-delay: .4s; }
+
+.tiles > * { animation: rise-in .5s ease-out backwards; }
+.tiles > :nth-child(1) { animation-delay: .45s; }
+.tiles > :nth-child(2) { animation-delay: .52s; }
+.tiles > :nth-child(3) { animation-delay: .59s; }
+.tiles > :nth-child(4) { animation-delay: .66s; }
+.tiles > :nth-child(5) { animation-delay: .73s; }
+.tiles > :nth-child(6) { animation-delay: .80s; }
+
+@media (prefers-reduced-motion: reduce) {
+  main > *, .tiles > * { animation: none; }
+}
