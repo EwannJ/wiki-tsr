@@ -1,5 +1,10 @@
 # Sert toutes les pages du wiki (index.html, en-travaux/index.html, ...) déjà traduites : le navigateur reçoit le HTML final.
 # Français = langue d'origine. Autres langues : DeepL, puis cache (mémoire de l'instance, Supabase si configuré, CDN Vercel).
+# Indications dans le HTML, sur l'élément qui contient le texte (ex. <a class="nav-link" ...>Formations</a>) :
+#   data-context="..."  précise à DeepL le sens de CE texte (ex. data-context="training courses for players, not train sets")
+#   data-tr-de="..."    impose la traduction dans une langue (data-tr-en-us, data-tr-pt-br... ; data-tr-en vaut pour EN-US et EN-GB)
+# Les textes du menu sont traduits une seule fois par langue puis repris tels quels partout où ils apparaissent (menu, tuiles...) :
+# les indications posées sur une entrée du menu suffisent. Elles ne sont jamais envoyées au navigateur.
 # Variables d'environnement : DEEPL_API_KEY (obligatoire pour traduire), SUPABASE_URL_TSR + SUPABASE_KEY_TSR (optionnelles, cache durable).
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -24,7 +29,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #          (sans ?lang= dans l'URL : langue du navigateur)
 #          True  = l'URL reste propre : si ?lang=xx est présent (menu, lien partagé), la langue est mémorisée dans le cookie "lang"
 #                  puis ?lang=xx est retiré de l'URL (redirection). Sans cookies, la langue n'est alors pas conservée d'une page à l'autre.
-HIDE_LANG_PARAM = True
+HIDE_LANG_PARAM = False
 
 DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
 # les clés gratuites finissent par ":fx"
@@ -269,44 +274,79 @@ def _peel(fragment: str) -> tuple:
     return lead, fragment, trail
 
 
-# traductions imposées {texte français: {langue DeepL: texte}} : sert quand DeepL traduit mal un mot du menu (à compléter)
-_OVERRIDES = {"Formations": {"EN-US": "Trainings", "EN-GB": "Trainings"}}
-# précisions ajoutées au contexte de la traduction du menu
-_HINTS = "'Formations' means 'trainings' for conductor and regulator of train, for players, not train formations, training courses or train sets."
+_HINT_RE = re.compile(r'\bdata-(context|tr-[a-z0-9]+(?:-[a-z0-9]+)*)="([^"]*)"', re.I)
+_HINT_STRIP_RE = re.compile(r'\s+data-(?:context|tr-[a-z0-9-]+)="[^"]*"', re.I)
 _labels_memory = {}  # (empreinte, langue) -> {texte français: traduction}
 
 
+def _hints(body: str, start: int) -> dict:
+    """Indications (data-context, data-tr-xx) de la balise ouvrante juste avant le texte qui commence à `start`."""
+    tag = body[body.rfind("<", 0, start):start]
+    return {m.group(1).lower(): html.unescape(m.group(2)) for m in _HINT_RE.finditer(tag)}
+
+
+def _forced(hints: dict, lang: str):
+    """Traduction imposée pour cette langue (EN-US : data-tr-en-us, sinon data-tr-en), ou None."""
+    code = lang.lower()
+    return hints.get(f"tr-{code}", hints.get(f"tr-{code.split('-')[0]}"))
+
+
+def _deepl_hinted(items: list, target: str, as_html: bool, context: str):
+    """items = [(texte, data-context)] : un envoi par data-context différent, ajouté au contexte général ; None si échec."""
+    groups = {}
+    for i, (_, hint) in enumerate(items):
+        groups.setdefault(hint, []).append(i)
+    out = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=max(1, len(groups))) as pool:
+        jobs = {hint: pool.submit(_deepl, [items[i][0] for i in rows], target, as_html,
+                                  f"{context} Meaning of the texts to translate: {hint}" if hint else context)
+                for hint, rows in groups.items()}
+        for hint, rows in groups.items():
+            done = jobs[hint].result()
+            if done is None:
+                return None
+            for i, text in zip(rows, done):
+                out[i] = text
+    return out
+
+
 def _label_translations(topbar_raw: str, lang: str):
-    """{texte français: traduction} pour chaque texte du menu : traduits une seule fois, repris tels quels partout (menu, tuiles...)."""
+    """{texte français: traduction} des textes du menu, ou None si DeepL échoue."""
     cut = _BODY_RE.search(topbar_raw)
     body = topbar_raw[cut.end():] if cut else topbar_raw
-    labels = sorted({_visible_text(body[a:b]) for a, b, to_translate in _split(body) if to_translate} - {""})
-    labels = [label for label in labels if _LETTER_RE.search(label)]
-    key = (hashlib.sha256("\n".join(labels).encode()).hexdigest(), lang)
+    labels = {}  # texte français -> indications de son élément
+    for a, b, to_translate in _split(body):
+        text = _visible_text(body[a:b])
+        if to_translate and _LETTER_RE.search(text):
+            labels.setdefault(text, {}).update(_hints(body, a))
+    key = (hashlib.sha256(json.dumps(labels, sort_keys=True, ensure_ascii=False).encode()).hexdigest(), lang)
     if key not in _labels_memory:
         if not DEEPL_API_KEY or time.time() - _failed.get(lang, 0) < 60:
             return None
-        context = f"{_CONTEXT} The texts are the menu entries of the site: {', '.join(labels)}. {_HINTS}"
-        done = _deepl(labels, lang, False, context)
+        todo = [text for text, hints in labels.items() if _forced(hints, lang) is None]
+        context = f"{_CONTEXT} The texts are the menu entries of the site: {', '.join(labels)}."
+        done = _deepl_hinted([(text, labels[text].get("context", "")) for text in todo], lang, False, context)
         if done is None:
             _failed[lang] = time.time()
             return None
-        _labels_memory[key] = dict(zip(labels, done))
-    result = dict(_labels_memory[key])
-    for text, by_lang in _OVERRIDES.items():
-        if text in result and lang in by_lang:
-            result[text] = by_lang[lang]
-    return result
+        _labels_memory[key] = dict(zip(todo, done))
+    forced = {text: value for text, hints in labels.items() if (value := _forced(hints, lang)) is not None}
+    return {**_labels_memory[key], **forced}
 
 
 _ONLY_TEXT_RE = re.compile(r"((?:<[^>]+>\s*)*)([^<>]+?)(\s*(?:</[^>]+>\s*)*)")
 
 
-def _known_label(core: str, labels: dict):
-    """Traduction déjà connue si le bloc ne contient que le texte d'une entrée du menu, sinon None."""
+def _known(core: str, hints: dict, lang: str, labels: dict):
+    """Bloc traduit sans DeepL (traduction imposée dans le HTML, ou texte du menu déjà traduit), sinon None."""
     m = _ONLY_TEXT_RE.fullmatch(core)
-    text = labels.get(_visible_text(m.group(2))) if m else None
-    return None if text is None else m.group(1) + html.escape(text, quote=False) + m.group(3)
+    text = _forced(hints, lang)
+    if text is None and m:
+        text = labels.get(_visible_text(m.group(2)))
+    if text is None:
+        return None
+    text = html.escape(text, quote=False)
+    return m.group(1) + text + m.group(3) if m else text  # les balises autour du texte sont gardées
 
 
 def _mark_no_translate(fragment: str) -> str:
@@ -336,10 +376,11 @@ def _translate(raw: str, target: str, context: str = _CONTEXT, labels: dict = No
     plain_in = ([html.unescape(title.group(2))] if title else []) + attrs
 
     peeled = [_peel(body[a:b]) for a, b in blocks]
-    known = [_known_label(core, labels or {}) for _, core, _ in peeled]
-    todo = [_mark_no_translate(core) for (_, core, _), text in zip(peeled, known) if text is None]
+    hints = [_hints(body, a) for a, _ in blocks]
+    known = [_known(core, h, target, labels or {}) for (_, core, _), h in zip(peeled, hints)]
+    todo = [(_mark_no_translate(core), h.get("context", "")) for (_, core, _), h, text in zip(peeled, hints, known) if text is None]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        job_blocks = pool.submit(_deepl, todo, target, True, context) if todo else None
+        job_blocks = pool.submit(_deepl_hinted, todo, target, True, context) if todo else None
         job_plain = pool.submit(_deepl, plain_in, target, False, context) if plain_in else None
         done_blocks = job_blocks.result() if job_blocks else []
         done_plain = job_plain.result() if job_plain else []
@@ -443,18 +484,26 @@ def _link_with_lang(match, param: str) -> str:
     return f'{prefix}{path}?{"&".join(kept + [param])}{hash_sep}{fragment}{suffix}'
 
 
+def _translate_parts(parts: dict, lang: str):
+    """{nom: (HTML traduit, origine)} pour le menu, le pied de page et la page ; None si DeepL échoue."""
+    labels = _label_translations(parts["topbar"], lang)  # d'abord le menu : ses traductions servent ensuite partout
+    if labels is None:
+        return None
+    nav = _visible_text(parts["topbar"])
+    with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+        jobs = {name: pool.submit(_cached_translation, name, raw, lang, _build_context(raw, nav), labels) for name, raw in parts.items()}
+        results = {name: job.result() for name, job in jobs.items()}
+    return None if any(text is None for text, _ in results.values()) else results
+
+
 def _render(page_path: str, lang: str, link_param: str) -> tuple:
     """(HTML final, origine, langue réellement servie)."""
     raw_page = _read(os.path.join(page_path, "index.html"))
     parts = {"topbar": _read("global/topbar.html"), "footer": _read("global/footer.html"), f"page_{page_path or 'index'}": raw_page}
     source = "fr"
     if lang != "FR":
-        nav = _visible_text(parts["topbar"])
-        contexts = {name: _build_context(raw, nav) for name, raw in parts.items()}
-        labels = _label_translations(parts["topbar"], lang)
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            results = dict(zip(parts, pool.map(lambda item: _cached_translation(item[0], item[1], lang, contexts[item[0]], labels), parts.items()))) if labels is not None else {"": (None, "fail")}
-        if any(text is None for text, _ in results.values()):
+        results = _translate_parts(parts, lang)
+        if results is None:
             lang = "FR"  # DeepL indisponible : version française
         else:
             parts = {name: text for name, (text, _) in results.items()}
@@ -466,6 +515,7 @@ def _render(page_path: str, lang: str, link_param: str) -> tuple:
         .replace("%%LANG_OPTIONS%%", _language_options(lang))
     )
     page = page.replace('<div id="site-topbar"></div>', topbar).replace('<div id="site-footer"></div>', parts["footer"])
+    page = _HINT_STRIP_RE.sub("", page)
     page = _HREF_RE.sub(lambda m: _link_with_lang(m, link_param), page)
     marker = " data-hide-lang" if HIDE_LANG_PARAM else ""  # lu par translate.js : le menu n'ajoute alors pas ?lang= à l'URL
     page = page.replace('<html lang="fr"', f'<html lang="{lang.lower()}"{marker}', 1)
