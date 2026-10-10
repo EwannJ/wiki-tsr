@@ -44,7 +44,7 @@ _CONTEXT_LIMIT = 3000
 # nom de chaque langue écrit dans sa propre langue (DeepL ne renvoie que des noms en anglais)
 _NATIVE = {
     "AR": "العربية", "BG": "Български", "CS": "Čeština", "DA": "Dansk", "DE": "Deutsch", "EL": "Ελληνικά",
-    "EN-GB": "English (UK)", "EN-US": "English (US)", "ES": "Español", "ES-419": "Español (Latinoamérica)",
+    "EN": "English", "ES": "Español",
     "ET": "Eesti", "FI": "Suomi", "HE": "עברית", "HU": "Magyar", "ID": "Bahasa Indonesia", "IT": "Italiano",
     "JA": "日本語", "KO": "한국어", "LT": "Lietuvių", "LV": "Latviešu", "NB": "Norsk bokmål", "NL": "Nederlands",
     "PL": "Polski", "PT-BR": "Português (Brasil)", "PT-PT": "Português (Portugal)", "RO": "Română",
@@ -53,7 +53,7 @@ _NATIVE = {
 }
 # codes du navigateur / de l'URL -> code DeepL
 _ALIASES = {
-    "EN": "EN-US", "PT": "PT-PT", "ZH": "ZH-HANS", "ZH-CN": "ZH-HANS", "ZH-SG": "ZH-HANS",
+    "EN": "EN-GB", "PT": "PT-PT", "ZH": "ZH-HANS", "ZH-CN": "ZH-HANS", "ZH-SG": "ZH-HANS",
     "ZH-TW": "ZH-HANT", "ZH-HK": "ZH-HANT", "ZH-MO": "ZH-HANT", "NO": "NB", "NN": "NB",
 }
 
